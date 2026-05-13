@@ -6,12 +6,17 @@ from telegram.ext import (
     MessageHandler, filters, ContextTypes, ConversationHandler
 )
 from datetime import datetime
-import json
+from supabase import create_client, Client
 
 # ===================== SOZLAMALAR =====================
-BOT_TOKEN = "8642617336:AAEtQc8o0YEqKRH7Rt8vedsP9G08dv4p0FY"
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8642617336:AAEtQc8o0YEqKRH7Rt8vedsP9G08dv4p0FY")
 ADMIN_IDS = [8383029735]
 ADMIN_USERNAME = "@khidirov_garant"
+
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
+
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # To'lov usullari
 KARTALAR = [
@@ -67,24 +72,36 @@ DONATLAR = {
     }
 }
 
-# ===================== MA'LUMOTLAR SAQLASH =====================
-ORDERS_FILE = "orders.json"
-
+# ===================== SUPABASE FUNKSIYALAR =====================
 def load_orders():
-    if os.path.exists(ORDERS_FILE):
-        with open(ORDERS_FILE, "r") as f:
-            return json.load(f)
-    return {}
+    try:
+        res = supabase.table("orders").select("*").execute()
+        return {str(o["order_id"]): o for o in res.data}
+    except Exception as e:
+        logging.error(f"load_orders xato: {e}")
+        return {}
 
-def save_orders(orders):
-    with open(ORDERS_FILE, "w") as f:
-        json.dump(orders, f, ensure_ascii=False, indent=2)
+def save_order(order: dict):
+    try:
+        supabase.table("orders").insert(order).execute()
+    except Exception as e:
+        logging.error(f"save_order xato: {e}")
+
+def update_order_status(order_id: str, status: str):
+    try:
+        supabase.table("orders").update({"status": status}).eq("order_id", order_id).execute()
+    except Exception as e:
+        logging.error(f"update_order_status xato: {e}")
 
 def next_order_id():
-    orders = load_orders()
-    if not orders:
+    try:
+        res = supabase.table("orders").select("order_id").execute()
+        if not res.data:
+            return "1001"
+        return str(max(int(o["order_id"]) for o in res.data) + 1)
+    except Exception as e:
+        logging.error(f"next_order_id xato: {e}")
         return "1001"
-    return str(max(int(k) for k in orders.keys()) + 1)
 
 # ===================== /start =====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -204,7 +221,7 @@ async def screenshot_qabul(update: Update, context: ContextTypes.DEFAULT_TYPE):
     narx_format = f"{variant['narx']:,}".replace(",", " ")
 
     order = {
-        "id": order_id,
+        "order_id": order_id,
         "user_id": user.id,
         "user_name": user.full_name,
         "username": user.username or "yo'q",
@@ -217,11 +234,8 @@ async def screenshot_qabul(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "sana": datetime.now().strftime("%Y-%m-%d %H:%M")
     }
 
-    orders = load_orders()
-    orders[order_id] = order
-    save_orders(orders)
+    save_order(order)
 
-    # Foydalanuvchiga xabar
     await update.message.reply_text(
         f"✅ *Buyurtmangiz qabul qilindi!*\n\n"
         f"🔢 Buyurtma ID: `#{order_id}`\n"
@@ -234,7 +248,6 @@ async def screenshot_qabul(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-    # Adminga xabar
     for admin_id in ADMIN_IDS:
         try:
             keyboard = [
@@ -248,7 +261,7 @@ async def screenshot_qabul(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 photo=photo_id,
                 caption=(
                     f"🆕 *Yangi buyurtma #{order_id}*\n\n"
-                    f"👤 Foydalanuvchi: {user.full_name} (@{user.username or 'yo\'q'})\n"
+                    f"👤 Foydalanuvchi: {user.full_name} (@{user.username or 'yo\\'q'})\n"
                     f"🆔 Player ID: {player_id}\n"
                     f"💎 Donat: {DONATLAR[tur]['nomi']} — {variant['miqdor']}\n"
                     f"💰 Narx: {narx_format} so'm\n"
@@ -305,12 +318,9 @@ async def admin_tasdiqlash(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("Buyurtma topilmadi!", show_alert=True)
         return
 
-    orders[order_id]["status"] = "tasdiqlangan"
-    save_orders(orders)
-
+    update_order_status(order_id, "tasdiqlangan")
     order = orders[order_id]
 
-    # Foydalanuvchiga xabar
     try:
         await context.bot.send_message(
             chat_id=order["user_id"],
@@ -343,12 +353,9 @@ async def admin_bekor(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("Buyurtma topilmadi!", show_alert=True)
         return
 
-    orders[order_id]["status"] = "bekor_qilingan"
-    save_orders(orders)
-
+    update_order_status(order_id, "bekor_qilingan")
     order = orders[order_id]
 
-    # Foydalanuvchiga xabar
     try:
         await context.bot.send_message(
             chat_id=order["user_id"],
